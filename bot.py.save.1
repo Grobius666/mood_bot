@@ -1,0 +1,105 @@
+You can use this token to access HTTP API:
+8562692518:AAHLbn0hW7T-Ku2uDcndkMpH1uhB2jNUJEE
+
+For a description of the Bot API, see this page: https://core.telegram.org/bots/apiimport sqlite3
+from datetime import datetime
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+TOKEN = ""
+You can use this token to access HTTP API:
+8562692518:AAHLbn0hW7T-Ku2uDcndkMpH1uhB2jNUJEE
+conn = sqlite3.connect("mood.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS entries (
+    user_id INTEGER,
+    date TEXT,
+    mood INTEGER,
+    sleep REAL,
+    alcohol TEXT,
+    food TEXT,
+    cycle TEXT
+)
+""")
+conn.commit()
+
+main_kb = ReplyKeyboardMarkup([
+    ["➕ Запис", "📊 Статистика"]
+], resize_keyboard=True)
+
+mood_kb = ReplyKeyboardMarkup([
+    ["1", "2", "3", "4", "5"]
+], resize_keyboard=True)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привіт 👋 Це твій трекер настрою",
+        reply_markup=main_kb
+    )
+
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.message.from_user.id
+
+    if text == "➕ Запис":
+        context.user_data["step"] = "mood"
+        await update.message.reply_text("Оціни настрій (1–5)", reply_markup=mood_kb)
+
+    elif context.user_data.get("step") == "mood":
+        context.user_data["mood"] = int(text)
+        context.user_data["step"] = "sleep"
+        await update.message.reply_text("Скільки годин спав?")
+
+    elif context.user_data.get("step") == "sleep":
+        context.user_data["sleep"] = float(text)
+        context.user_data["step"] = "alcohol"
+        await update.message.reply_text("Алкоголь? (так/ні)")
+
+    elif context.user_data.get("step") == "alcohol":
+        context.user_data["alcohol"] = text
+        context.user_data["step"] = "food"
+        await update.message.reply_text("Як їжа? (добре/погано)")
+
+    elif context.user_data.get("step") == "food":
+        context.user_data["food"] = text
+        context.user_data["step"] = "cycle"
+        await update.message.reply_text("День циклу / фаза?")
+
+    elif context.user_data.get("step") == "cycle":
+        context.user_data["cycle"] = text
+
+        cursor.execute("""
+        INSERT INTO entries VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            datetime.now().strftime("%Y-%m-%d"),
+            context.user_data["mood"],
+            context.user_data["sleep"],
+            context.user_data["alcohol"],
+            context.user_data["food"],
+            context.user_data["cycle"]
+        ))
+        conn.commit()
+
+        context.user_data.clear()
+
+        await update.message.reply_text("Збережено ✅", reply_markup=main_kb)
+
+    elif text == "📊 Статистика":
+        cursor.execute("SELECT AVG(mood), AVG(sleep) FROM entries WHERE user_id=?", (user_id,))
+        result = cursor.fetchone()
+
+        await update.message.reply_text(
+            f"📊 Середній настрій: {round(result[0] or 0,2)}\n"
+            f"😴 Середній сон: {round(result[1] or 0,2)} год",
+            reply_markup=main_kb
+        )
+
+app = ApplicationBuilder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT, handle))
+
+app.run_polling()
