@@ -1,11 +1,26 @@
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
+from zoneinfo import ZoneInfo
+
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
 TOKEN = os.getenv("BOT_TOKEN", "8562692518:AAHLbn0hW7T-Ku2uDcndkMpH1uhB2jNUJEE")
 DB_NAME = os.getenv("DB_NAME", "/data/mood_dashboard.db")
+TZ = ZoneInfo("Europe/Berlin")
+
+
+def now():
+    return datetime.now(TZ)
+
 
 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
 cursor = conn.cursor()
@@ -20,11 +35,28 @@ CREATE TABLE IF NOT EXISTS events (
     timestamp TEXT
 )
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS bot_users (
+    user_id INTEGER PRIMARY KEY
+)
+""")
+
 conn.commit()
 
 
+# ---------- DB ----------
+
+def save_user(user_id):
+    cursor.execute(
+        "INSERT OR IGNORE INTO bot_users (user_id) VALUES (?)",
+        (user_id,)
+    )
+    conn.commit()
+
+
 def today_str():
-    return datetime.now().strftime("%Y-%m-%d")
+    return now().strftime("%Y-%m-%d")
 
 
 def display_date(date_str):
@@ -36,10 +68,10 @@ def selected_date(context):
 
 
 def save_event(user_id, type_, value, extra=None, date_str=None):
-    ts = f"{date_str or today_str()} {datetime.now().strftime('%H:%M')}"
+    ts = f"{date_str or today_str()} {now().strftime('%H:%M')}"
     cursor.execute(
         "INSERT INTO events (user_id, type, value, extra, timestamp) VALUES (?, ?, ?, ?, ?)",
-        (user_id, type_, value, extra, ts)
+        (user_id, type_, value, extra, ts),
     )
     conn.commit()
 
@@ -69,18 +101,6 @@ def daily_score(user_id, date_str):
     return round(avg, 1) if avg else None
 
 
-def score_emoji(score):
-    if score is None:
-        return "▫️"
-    if score >= 8:
-        return "🔥"
-    if score >= 6:
-        return "🙂"
-    if score >= 4:
-        return "😐"
-    return "😞"
-
-
 def get_cycle_phase(user_id):
     cursor.execute("""
     SELECT timestamp FROM events
@@ -93,31 +113,63 @@ def get_cycle_phase(user_id):
         return "цикл ще не задано"
 
     start = datetime.strptime(row[0], "%Y-%m-%d %H:%M")
-    day = (datetime.now() - start).days + 1
+    days = (now().replace(tzinfo=None) - start).days + 1
 
-    if day <= 5:
-        return f"🔴 Менструація • день {day}"
-    if day <= 13:
-        return f"🌱 Фолікулярна • день {day}"
-    if day <= 16:
-        return f"🔥 Овуляторне вікно • день {day}"
-    if day <= 28:
-        return f"🌙 Лютеїнова • день {day}"
-    return f"⚪ День {day} • варто оновити старт циклу"
+    if days <= 5:
+        return f"🔴 Менструація • день {days}"
+    if days <= 13:
+        return f"🌱 Фолікулярна • день {days}"
+    if days <= 16:
+        return f"🔥 Овуляторне вікно • день {days}"
+    if days <= 28:
+        return f"🌙 Лютеїнова • день {days}"
+    return f"⚪ День {days} • варто оновити старт циклу"
+
+
+# ---------- UI ----------
+
+def score_emoji(score):
+    if score is None:
+        return "▫️"
+    if score >= 8:
+        return "🔥"
+    if score >= 6:
+        return "🙂"
+    if score >= 4:
+        return "😐"
+    return "😞"
 
 
 def dashboard_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("😊 Настрій", callback_data="add_mood"), InlineKeyboardButton("🍽 Їжа", callback_data="add_food")],
-        [InlineKeyboardButton("😴 Сон", callback_data="add_sleep"), InlineKeyboardButton("🍷 Алкоголь", callback_data="add_alcohol")],
-        [InlineKeyboardButton("🔴 Цикл", callback_data="add_cycle"), InlineKeyboardButton("📅 Календар", callback_data="calendar")],
-        [InlineKeyboardButton("📊 7 днів", callback_data="stats_week"), InlineKeyboardButton("✏️ Редагувати", callback_data="edit_day")],
-        [InlineKeyboardButton("◀️", callback_data="prev_day"), InlineKeyboardButton("Сьогодні", callback_data="today"), InlineKeyboardButton("▶️", callback_data="next_day")],
+        [
+            InlineKeyboardButton("😊 Настрій", callback_data="add_mood"),
+            InlineKeyboardButton("🍽 Їжа", callback_data="add_food"),
+        ],
+        [
+            InlineKeyboardButton("😴 Сон", callback_data="add_sleep"),
+            InlineKeyboardButton("🍷 Алкоголь", callback_data="add_alcohol"),
+        ],
+        [
+            InlineKeyboardButton("🔴 Цикл", callback_data="add_cycle"),
+            InlineKeyboardButton("📅 Календар", callback_data="calendar"),
+        ],
+        [
+            InlineKeyboardButton("📊 7 днів", callback_data="stats_week"),
+            InlineKeyboardButton("✏️ Редагувати", callback_data="edit_day"),
+        ],
+        [
+            InlineKeyboardButton("◀️", callback_data="prev_day"),
+            InlineKeyboardButton("Сьогодні", callback_data="today"),
+            InlineKeyboardButton("▶️", callback_data="next_day"),
+        ],
     ])
 
 
 def back_menu():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="dashboard")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Назад", callback_data="dashboard")]
+    ])
 
 
 def mood_menu():
@@ -178,7 +230,11 @@ def alcohol_type_menu():
 
 def alcohol_amount_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1", callback_data="alc_amount_1"), InlineKeyboardButton("2", callback_data="alc_amount_2"), InlineKeyboardButton("3+", callback_data="alc_amount_3+")],
+        [
+            InlineKeyboardButton("1", callback_data="alc_amount_1"),
+            InlineKeyboardButton("2", callback_data="alc_amount_2"),
+            InlineKeyboardButton("3+", callback_data="alc_amount_3+"),
+        ],
         [InlineKeyboardButton("✍️ Вручну", callback_data="alc_amount_custom")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="dashboard")]
     ])
@@ -196,6 +252,8 @@ def cycle_menu():
     ])
 
 
+# ---------- RENDER ----------
+
 def format_dashboard(user_id, date_str):
     rows = get_day_events(user_id, date_str)
     score = daily_score(user_id, date_str)
@@ -206,40 +264,81 @@ def format_dashboard(user_id, date_str):
     text += f"🔴 {cycle}\n\n"
 
     mood_map = {"1": "😞", "3": "😐", "5": "🙂", "7": "😊", "10": "😁"}
-    meal_map = {"breakfast": "Сніданок", "lunch": "Обід", "snack": "Перекус", "dinner": "Вечеря"}
-    alc_map = {"beer": "Пиво", "wine": "Вино", "strong": "Міцний", "cocktail": "Коктейль", "none": "Не пила"}
-    cycle_map = {"menstruation": "Менструація", "follicular": "Фолікулярна", "ovulation": "Овуляція", "luteal": "Лютеїнова"}
+    meal_map = {
+        "breakfast": "Сніданок",
+        "lunch": "Обід",
+        "snack": "Перекус",
+        "dinner": "Вечеря",
+    }
+    alc_map = {
+        "beer": "Пиво",
+        "wine": "Вино",
+        "strong": "Міцний",
+        "cocktail": "Коктейль",
+        "none": "Не пила",
+    }
+    cycle_map = {
+        "menstruation": "Менструація",
+        "follicular": "Фолікулярна",
+        "ovulation": "Овуляція",
+        "luteal": "Лютеїнова",
+    }
 
-    groups = {"mood": [], "food": [], "sleep": [], "alcohol": [], "cycle": []}
+    groups = {
+        "mood": [],
+        "food": [],
+        "sleep": [],
+        "alcohol": [],
+        "cycle": [],
+    }
 
     for event_id, t, value, extra, ts in rows:
-        time = ts.split(" ")[1]
+        time_part = ts.split(" ")[1]
 
         if t == "mood":
             note = f" — {extra}" if extra else ""
-            groups["mood"].append(f"• {time} {mood_map.get(value, '🙂')} {value}/10{note}")
+            groups["mood"].append(
+                f"• {time_part} {mood_map.get(value, '🙂')} {value}/10{note}"
+            )
+
         elif t == "food":
-            groups["food"].append(f"• {meal_map.get(extra, extra)} — {value}")
+            groups["food"].append(
+                f"• {meal_map.get(extra, extra)} — {value}"
+            )
+
         elif t == "sleep":
-            groups["sleep"].append(f"• {value} год • {extra}")
+            groups["sleep"].append(
+                f"• {value} год • {extra}"
+            )
+
         elif t == "alcohol":
             if value == "none":
                 groups["alcohol"].append("• Не пила")
             else:
-                groups["alcohol"].append(f"• {alc_map.get(value, value)} • {extra}")
+                groups["alcohol"].append(
+                    f"• {alc_map.get(value, value)} • {extra}"
+                )
+
         elif t == "cycle_start":
             groups["cycle"].append("• Початок менструації")
+
         elif t == "cycle_phase":
-            groups["cycle"].append(f"• {cycle_map.get(value, value)}")
+            groups["cycle"].append(
+                f"• {cycle_map.get(value, value)}"
+            )
 
     if groups["mood"]:
         text += "😊 Настрій\n" + "\n".join(groups["mood"]) + "\n\n"
+
     if groups["food"]:
         text += "🍽 Їжа\n" + "\n".join(groups["food"]) + "\n\n"
+
     if groups["sleep"]:
         text += "😴 Сон\n" + "\n".join(groups["sleep"]) + "\n\n"
+
     if groups["alcohol"]:
         text += "🍷 Алкоголь\n" + "\n".join(groups["alcohol"]) + "\n\n"
+
     if groups["cycle"]:
         text += "🔴 Цикл\n" + "\n".join(groups["cycle"]) + "\n\n"
 
@@ -251,18 +350,22 @@ def format_dashboard(user_id, date_str):
 
 def calendar_text(user_id):
     text = "📅 Календар настрою\n\n"
+
     for i in range(13, -1, -1):
-        d = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+        d = (now() - timedelta(days=i)).strftime("%Y-%m-%d")
         score = daily_score(user_id, d)
         text += f"{display_date(d)} — {score if score is not None else '—'}/10 {score_emoji(score)}\n"
+
     return text
 
 
 def week_stats_text(user_id):
     items = []
+
     for i in range(6, -1, -1):
-        d = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+        d = (now() - timedelta(days=i)).strftime("%Y-%m-%d")
         score = daily_score(user_id, d)
+
         if score is not None:
             items.append((d, score))
 
@@ -272,52 +375,93 @@ def week_stats_text(user_id):
     scores = [x[1] for x in items]
     avg = round(sum(scores) / len(scores), 1)
 
-    text = f"📊 7 днів\n\nСередній стан: {avg}/10 {score_emoji(avg)}\n\n"
+    best = max(items, key=lambda x: x[1])
+    worst = min(items, key=lambda x: x[1])
+
+    if len(scores) >= 2:
+        if scores[-1] > scores[0]:
+            trend = "↗️ покращується"
+        elif scores[-1] < scores[0]:
+            trend = "↘️ знижується"
+        else:
+            trend = "→ стабільно"
+    else:
+        trend = "недостатньо даних"
+
+    text = "📊 7 днів\n\n"
+    text += f"Середній стан: {avg}/10 {score_emoji(avg)}\n"
+    text += f"Тренд: {trend}\n"
+    text += f"Кращий день: {display_date(best[0])} — {best[1]}/10\n"
+    text += f"Гірший день: {display_date(worst[0])} — {worst[1]}/10\n\n"
+
+    text += "По днях:\n"
     for d, s in items:
         text += f"• {display_date(d)} — {s}/10 {score_emoji(s)}\n"
+
     return text
 
 
 def edit_day_menu(user_id, date_str):
     rows = get_day_events(user_id, date_str)
-    buttons = []
 
     label_map = {
         "mood": "Настрій",
         "food": "Їжа",
         "sleep": "Сон",
         "alcohol": "Алкоголь",
-        "cycle_start": "Старт циклу",
+        "cycle_start": "Початок циклу",
         "cycle_phase": "Фаза циклу",
     }
 
+    buttons = []
+
     for event_id, t, value, extra, ts in rows:
-        buttons.append([InlineKeyboardButton(f"🗑 {ts.split(' ')[1]} • {label_map.get(t, t)}", callback_data=f"delete_{event_id}")])
+        buttons.append([
+            InlineKeyboardButton(
+                f"🗑 {ts.split(' ')[1]} • {label_map.get(t, t)}",
+                callback_data=f"delete_{event_id}",
+            )
+        ])
 
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="dashboard")])
+
     return InlineKeyboardMarkup(buttons)
 
 
 async def render_dashboard(q, context):
     user_id = q.from_user.id
     date_str = selected_date(context)
-    await q.message.edit_text(format_dashboard(user_id, date_str), reply_markup=dashboard_menu())
 
+    await q.message.edit_text(
+        format_dashboard(user_id, date_str),
+        reply_markup=dashboard_menu(),
+    )
+
+
+# ---------- HANDLERS ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    save_user(user_id)
+
     context.user_data.clear()
     context.user_data["selected_date"] = today_str()
+
     msg = await update.message.reply_text(
-        format_dashboard(update.message.from_user.id, today_str()),
-        reply_markup=dashboard_menu()
+        format_dashboard(user_id, today_str()),
+        reply_markup=dashboard_menu(),
     )
+
     context.user_data["dashboard_id"] = msg.message_id
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
     user_id = q.from_user.id
+    save_user(user_id)
+
     data = q.data
     date_str = selected_date(context)
 
@@ -344,7 +488,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("mood_"):
         context.user_data["mode"] = "mood_note"
         context.user_data["pending_mood"] = data.split("_")[1]
-        await q.message.edit_text("Нотатка до настрою.\n\nНапиши текст або '-' щоб пропустити.", reply_markup=back_menu())
+        await q.message.edit_text(
+            "Нотатка до настрою.\n\nНапиши текст або '-' щоб пропустити.",
+            reply_markup=back_menu(),
+        )
 
     elif data == "add_food":
         await q.message.edit_text("Який прийом їжі?", reply_markup=food_menu())
@@ -367,7 +514,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("sleep_quality_"):
         quality = "виспалась" if data.endswith("yes") else "не виспалась"
-        save_event(user_id, "sleep", context.user_data.get("pending_sleep", "—"), quality, date_str)
+        save_event(
+            user_id,
+            "sleep",
+            context.user_data.get("pending_sleep", "—"),
+            quality,
+            date_str,
+        )
         context.user_data.pop("pending_sleep", None)
         await render_dashboard(q, context)
 
@@ -384,13 +537,22 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("alc_amount_"):
         amount = data.replace("alc_amount_", "")
-        save_event(user_id, "alcohol", context.user_data.get("pending_alcohol", "unknown"), amount, date_str)
+        save_event(
+            user_id,
+            "alcohol",
+            context.user_data.get("pending_alcohol", "unknown"),
+            amount,
+            date_str,
+        )
         context.user_data.pop("pending_alcohol", None)
         await render_dashboard(q, context)
 
     elif data == "alc_amount_custom":
         context.user_data["mode"] = "alcohol_custom"
-        await q.message.edit_text("Напиши кількість, наприклад: 2 бокали.", reply_markup=back_menu())
+        await q.message.edit_text(
+            "Напиши кількість, наприклад: 2 бокали.",
+            reply_markup=back_menu(),
+        )
 
     elif data == "add_cycle":
         await q.message.edit_text("Цикл", reply_markup=cycle_menu())
@@ -405,7 +567,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await render_dashboard(q, context)
 
     elif data == "cycle_current":
-        await q.message.edit_text(f"🔴 Поточна автофаза:\n\n{get_cycle_phase(user_id)}", reply_markup=back_menu())
+        await q.message.edit_text(
+            f"🔴 Поточна автофаза:\n\n{get_cycle_phase(user_id)}",
+            reply_markup=back_menu(),
+        )
 
     elif data == "calendar":
         await q.message.edit_text(calendar_text(user_id), reply_markup=back_menu())
@@ -414,7 +579,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.edit_text(week_stats_text(user_id), reply_markup=back_menu())
 
     elif data == "edit_day":
-        await q.message.edit_text(f"✏️ Редагування {display_date(date_str)}", reply_markup=edit_day_menu(user_id, date_str))
+        await q.message.edit_text(
+            f"✏️ Редагування {display_date(date_str)}\n\nНатисни запис, щоб видалити:",
+            reply_markup=edit_day_menu(user_id, date_str),
+        )
 
     elif data.startswith("delete_"):
         delete_event(int(data.split("_")[1]))
@@ -423,26 +591,56 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    save_user(user_id)
+
     text = update.message.text.strip()
     mode = context.user_data.get("mode")
     date_str = selected_date(context)
 
     if mode == "mood_note":
-        save_event(user_id, "mood", context.user_data.get("pending_mood"), None if text == "-" else text, date_str)
+        save_event(
+            user_id,
+            "mood",
+            context.user_data.get("pending_mood"),
+            None if text == "-" else text,
+            date_str,
+        )
 
     elif mode == "food_text":
-        save_event(user_id, "food", text, context.user_data.get("pending_meal"), date_str)
+        save_event(
+            user_id,
+            "food",
+            text,
+            context.user_data.get("pending_meal"),
+            date_str,
+        )
 
     elif mode == "sleep_custom":
         context.user_data["pending_sleep"] = text
         context.user_data.pop("mode", None)
-        await update.message.delete()
-        msg = context.user_data.get("dashboard_id")
-        await context.bot.send_message(chat_id=user_id, text="Як по відчуттях?", reply_markup=sleep_quality_menu())
+
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        await update.message.reply_text(
+            "Як по відчуттях?",
+            reply_markup=sleep_quality_menu(),
+        )
         return
 
     elif mode == "alcohol_custom":
-        save_event(user_id, "alcohol", context.user_data.get("pending_alcohol"), text, date_str)
+        save_event(
+            user_id,
+            "alcohol",
+            context.user_data.get("pending_alcohol"),
+            text,
+            date_str,
+        )
+
+    else:
+        return
 
     context.user_data.pop("mode", None)
     context.user_data.pop("pending_mood", None)
@@ -455,24 +653,82 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     dashboard_id = context.user_data.get("dashboard_id")
+
     if dashboard_id:
-        await context.bot.edit_message_text(
-            chat_id=user_id,
-            message_id=dashboard_id,
-            text=format_dashboard(user_id, date_str),
-            reply_markup=dashboard_menu()
-        )
-    else:
-        msg = await context.bot.send_message(
-            chat_id=user_id,
-            text=format_dashboard(user_id, date_str),
-            reply_markup=dashboard_menu()
-        )
-        context.user_data["dashboard_id"] = msg.message_id
+        try:
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=dashboard_id,
+                text=format_dashboard(user_id, date_str),
+                reply_markup=dashboard_menu(),
+            )
+            return
+        except Exception:
+            pass
+
+    msg = await context.bot.send_message(
+        chat_id=user_id,
+        text=format_dashboard(user_id, date_str),
+        reply_markup=dashboard_menu(),
+    )
+    context.user_data["dashboard_id"] = msg.message_id
 
 
-app = ApplicationBuilder().token(TOKEN).build()
+# ---------- REMINDERS ----------
+
+async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
+    cursor.execute("SELECT user_id FROM bot_users")
+    users = cursor.fetchall()
+
+    for (user_id,) in users:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🌤 Добрий ранок. Як сьогодні настрій?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("😊 Залогати настрій", callback_data="add_mood")]
+            ]),
+        )
+
+
+async def evening_reminder(context: ContextTypes.DEFAULT_TYPE):
+    cursor.execute("SELECT user_id FROM bot_users")
+    users = cursor.fetchall()
+
+    for (user_id,) in users:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🌙 Час заповнити день: настрій, їжа, сон, алкоголь, цикл.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Відкрити день", callback_data="dashboard")]
+            ]),
+        )
+
+
+async def post_init(application):
+    application.job_queue.run_daily(
+        morning_reminder,
+        time=dtime(hour=10, minute=0, tzinfo=TZ),
+        name="morning_reminder",
+    )
+
+    application.job_queue.run_daily(
+        evening_reminder,
+        time=dtime(hour=21, minute=30, tzinfo=TZ),
+        name="evening_reminder",
+    )
+
+
+# ---------- APP ----------
+
+app = (
+    ApplicationBuilder()
+    .token(TOKEN)
+    .post_init(post_init)
+    .build()
+)
+
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
 app.run_polling()
